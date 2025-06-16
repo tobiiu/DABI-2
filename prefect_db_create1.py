@@ -17,52 +17,6 @@ def create_tables():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # Drop + Create Statements
-    cursor.executescript('''
-        DROP TABLE IF EXISTS invoice;
-        DROP TABLE IF EXISTS product;
-        DROP TABLE IF EXISTS aisle;
-        DROP TABLE IF EXISTS department;
-        DROP TABLE IF EXISTS orders;
-        DROP TABLE IF EXISTS user;
-
-        CREATE TABLE user (user_id INTEGER PRIMARY KEY);
-        CREATE TABLE orders (
-            order_id INTEGER PRIMARY KEY,
-            date DATE,
-            tip INTEGER,
-            user_id INTEGER,
-            FOREIGN KEY (user_id) REFERENCES user(user_id)
-        );
-        CREATE TABLE department (
-            department_id INTEGER PRIMARY KEY,
-            department_name TEXT
-        );
-        CREATE TABLE aisle (
-            aisle_id INTEGER PRIMARY KEY,
-            aisle_name TEXT,
-            department_id INTEGER,
-            FOREIGN KEY (department_id) REFERENCES department(department_id)
-        );
-        CREATE TABLE product (
-            product_id INTEGER PRIMARY KEY,
-            product_name TEXT,
-            aisle_id INTEGER,
-            FOREIGN KEY (aisle_id) REFERENCES aisle(aisle_id)
-        );
-        CREATE TABLE invoice (
-            order_id INTEGER,
-            product_id INTEGER,
-            add_to_cart_order INTEGER,
-            PRIMARY KEY (order_id, product_id),
-            FOREIGN KEY (order_id) REFERENCES orders(order_id),
-            FOREIGN KEY (product_id) REFERENCES product(product_id)
-        );
-    ''')
-
-    conn.commit()
-    conn.close()
-
 
 @task
 def load_data():
