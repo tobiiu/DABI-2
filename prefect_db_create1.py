@@ -21,40 +21,40 @@ def create_tables():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # Drop tables if they exist, then create new ones (normalized schema)
+    # Create tables only if they do not exist (safe to rerun)
     cursor.executescript("""
-        DROP TABLE IF EXISTS invoice;
-        DROP TABLE IF EXISTS product;
-        DROP TABLE IF EXISTS aisle;
-        DROP TABLE IF EXISTS department;
-        DROP TABLE IF EXISTS orders;
-        DROP TABLE IF EXISTS user;
+        CREATE TABLE IF NOT EXISTS user (
+            user_id INTEGER PRIMARY KEY
+        );
 
-        CREATE TABLE user (user_id INTEGER PRIMARY KEY);
-        CREATE TABLE orders (
+        CREATE TABLE IF NOT EXISTS orders (
             order_id INTEGER PRIMARY KEY,
             date DATE,
             tip INTEGER,
             user_id INTEGER,
             FOREIGN KEY (user_id) REFERENCES user(user_id)
         );
-        CREATE TABLE department (
+
+        CREATE TABLE IF NOT EXISTS department (
             department_id INTEGER PRIMARY KEY,
             department_name TEXT
         );
-        CREATE TABLE aisle (
+
+        CREATE TABLE IF NOT EXISTS aisle (
             aisle_id INTEGER PRIMARY KEY,
             aisle_name TEXT,
             department_id INTEGER,
             FOREIGN KEY (department_id) REFERENCES department(department_id)
         );
-        CREATE TABLE product (
+
+        CREATE TABLE IF NOT EXISTS product (
             product_id INTEGER PRIMARY KEY,
             product_name TEXT,
             aisle_id INTEGER,
             FOREIGN KEY (aisle_id) REFERENCES aisle(aisle_id)
         );
-        CREATE TABLE invoice (
+
+        CREATE TABLE IF NOT EXISTS invoice (
             order_id INTEGER,
             product_id INTEGER,
             add_to_cart_order INTEGER,
@@ -77,16 +77,19 @@ def load_data():
     return order_product, orders, tips
 
 # --------------------------------------------
-# 3. Insert data into the SQLite database
+# 3. Insert data into the SQLite database (only if empty)
 # --------------------------------------------
 @task
 def populate_tables(order_product, orders, tips):
     conn = sqlite3.connect(DB_NAME)
-    
-    # Merge orders with tips (left join)
+    cursor = conn.cursor()
+
+    def table_is_empty(table_name):
+        result = cursor.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+        return result[0] == 0
+
     m_tip_order = pd.merge(orders, tips, on='order_id', how='left')
 
-    # Extract distinct master data
     aisles = order_product[['aisle_id', 'aisle', 'department_id']].drop_duplicates().rename(columns={'aisle': 'aisle_name'})
     departments = order_product[['department_id', 'department']].drop_duplicates().rename(columns={'department': 'department_name'})
     products = order_product[['product_id', 'product_name', 'aisle_id']].drop_duplicates()
@@ -94,13 +97,19 @@ def populate_tables(order_product, orders, tips):
     orders_clean = m_tip_order[['order_id', 'order_date', 'user_id', 'tip']].rename(columns={'order_date': 'date'})
     invoices = order_product[['order_id', 'product_id', 'add_to_cart_order']]
 
-    # Save to database
-    departments.to_sql('department', conn, if_exists='append', index=False)
-    aisles.to_sql('aisle', conn, if_exists='append', index=False)
-    products.to_sql('product', conn, if_exists='append', index=False)
-    users.to_sql('user', conn, if_exists='append', index=False)
-    orders_clean.to_sql('orders', conn, if_exists='append', index=False)
-    invoices.to_sql('invoice', conn, if_exists='append', index=False)
+    if table_is_empty('department'):
+        departments.to_sql('department', conn, if_exists='append', index=False)
+    if table_is_empty('aisle'):
+        aisles.to_sql('aisle', conn, if_exists='append', index=False)
+    if table_is_empty('product'):
+        products.to_sql('product', conn, if_exists='append', index=False)
+    if table_is_empty('user'):
+        users.to_sql('user', conn, if_exists='append', index=False)
+    if table_is_empty('orders'):
+        orders_clean.to_sql('orders', conn, if_exists='append', index=False)
+    if table_is_empty('invoice'):
+        invoices.to_sql('invoice', conn, if_exists='append', index=False)
+
     conn.close()
 
 # --------------------------------------------
@@ -117,32 +126,26 @@ def feature_engineering(order_product, orders, tips):
 # --------------------------------------------
 @task
 def predict_tip(df):
-    # Split into training data (with tip) and prediction data (missing tip)
     train_df = df[~df['tip'].isna()].copy()
     predict_df = df[df['tip'].isna()].copy()
 
     print(f"\n🔢 Training data: {train_df.shape}")
     print(f"🔍 Prediction data: {predict_df.shape}")
 
-    # Use all numeric columns except IDs and the label
     features = [col for col in df.columns if col not in ['order_id', 'user_id', 'tip']]
     X = train_df[features]
     y = train_df['tip'].astype(int)
 
-    # Split into train/test for evaluation
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # Train a random forest classifier
     model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
     model.fit(X_train, y_train)
 
-    # Evaluate model
     y_pred = model.predict(X_test)
     print("\n📊 Classification report:")
     print("Accuracy:", accuracy_score(y_test, y_pred))
     print(classification_report(y_test, y_pred))
 
-    # Predict on unknown rows
     if not predict_df.empty:
         X_pred = predict_df[features]
         predict_df['tip'] = model.predict(X_pred).astype(int)
