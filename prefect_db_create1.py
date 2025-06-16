@@ -1,20 +1,27 @@
 from prefect import flow, task
 import sqlite3
 import pandas as pd
+
+# Feature Engineering and Forecasting from your modules
 from features import combine_all_features
 from Tip_forecasting import process_tip_time_series, plot_forecast_with_split
+
+# ML libraries
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 
 DB_NAME = "dabi2_projekt.db"
 
-
+# --------------------------------------------
+# 1. Create SQLite database structure
+# --------------------------------------------
 @task
 def create_tables():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
+    # Drop tables if they exist, then create new ones (normalized schema)
     cursor.executescript("""
         DROP TABLE IF EXISTS invoice;
         DROP TABLE IF EXISTS product;
@@ -56,11 +63,12 @@ def create_tables():
             FOREIGN KEY (product_id) REFERENCES product(product_id)
         );
     """)
-
     conn.commit()
     conn.close()
 
-
+# --------------------------------------------
+# 2. Load data from CSV/Parquet files
+# --------------------------------------------
 @task
 def load_data():
     order_product = pd.read_csv('order_products_denormalized.csv')
@@ -68,12 +76,17 @@ def load_data():
     tips = pd.read_csv('tips_public.csv').drop(columns=["Unnamed: 0"], errors='ignore')
     return order_product, orders, tips
 
-
+# --------------------------------------------
+# 3. Insert data into the SQLite database
+# --------------------------------------------
 @task
 def populate_tables(order_product, orders, tips):
     conn = sqlite3.connect(DB_NAME)
+    
+    # Merge orders with tips (left join)
     m_tip_order = pd.merge(orders, tips, on='order_id', how='left')
 
+    # Extract distinct master data
     aisles = order_product[['aisle_id', 'aisle', 'department_id']].drop_duplicates().rename(columns={'aisle': 'aisle_name'})
     departments = order_product[['department_id', 'department']].drop_duplicates().rename(columns={'department': 'department_name'})
     products = order_product[['product_id', 'product_name', 'aisle_id']].drop_duplicates()
@@ -81,58 +94,75 @@ def populate_tables(order_product, orders, tips):
     orders_clean = m_tip_order[['order_id', 'order_date', 'user_id', 'tip']].rename(columns={'order_date': 'date'})
     invoices = order_product[['order_id', 'product_id', 'add_to_cart_order']]
 
+    # Save to database
     departments.to_sql('department', conn, if_exists='append', index=False)
     aisles.to_sql('aisle', conn, if_exists='append', index=False)
     products.to_sql('product', conn, if_exists='append', index=False)
     users.to_sql('user', conn, if_exists='append', index=False)
     orders_clean.to_sql('orders', conn, if_exists='append', index=False)
     invoices.to_sql('invoice', conn, if_exists='append', index=False)
-
     conn.close()
 
-
+# --------------------------------------------
+# 4. Run full feature engineering
+# --------------------------------------------
 @task
 def feature_engineering(order_product, orders, tips):
     df = combine_all_features(orders, order_product, tips)
     df.to_csv("all_features.csv", index=False)
     return df
 
-
+# --------------------------------------------
+# 5. Machine learning to predict "tip" (yes/no)
+# --------------------------------------------
 @task
 def predict_tip(df):
+    # Split into training data (with tip) and prediction data (missing tip)
     train_df = df[~df['tip'].isna()].copy()
     predict_df = df[df['tip'].isna()].copy()
 
-    print(f"\n🔢 Trainingsdaten: {train_df.shape}")
-    print(f"🔍 Vorhersagedaten: {predict_df.shape}")
+    print(f"\n🔢 Training data: {train_df.shape}")
+    print(f"🔍 Prediction data: {predict_df.shape}")
 
+    # Use all numeric columns except IDs and the label
     features = [col for col in df.columns if col not in ['order_id', 'user_id', 'tip']]
     X = train_df[features]
     y = train_df['tip'].astype(int)
 
+    # Split into train/test for evaluation
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Train a random forest classifier
     model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
     model.fit(X_train, y_train)
 
+    # Evaluate model
     y_pred = model.predict(X_test)
-    print("\n📊 Klassifikations-Ergebnisse:")
+    print("\n📊 Classification report:")
     print("Accuracy:", accuracy_score(y_test, y_pred))
     print(classification_report(y_test, y_pred))
 
+    # Predict on unknown rows
     if not predict_df.empty:
         X_pred = predict_df[features]
         predict_df['tip'] = model.predict(X_pred).astype(int)
         predict_df[['order_id', 'tip']].to_csv("predicted_tips.csv", index=False)
-        print("\n✅ Vorhersagen gespeichert in 'predicted_tips.csv'")
+        print("\n✅ Predictions saved to 'predicted_tips.csv'")
 
-
+# --------------------------------------------
+# 6. Time series forecast for tip share
+# --------------------------------------------
 @task
 def run_forecasting(orders, tips):
-    forecast_df = process_tip_time_series(orders, tips, min_orders=30, forecast_hours=24 * 7)
+    forecast_df = process_tip_time_series(
+        orders, tips, min_orders=30, forecast_hours=24 * 7
+    )
     plot_forecast_with_split(forecast_df)
 
-
-@flow(name="DABI2 Gesamtprozess mit integriertem Modell")
+# --------------------------------------------
+# 7. Main Prefect flow – combines everything
+# --------------------------------------------
+@flow(name="DABI2 Full Process with Inline Model")
 def full_pipeline():
     create_tables()
     order_product, orders, tips = load_data()
@@ -141,6 +171,8 @@ def full_pipeline():
     predict_tip(all_features)
     run_forecasting(orders, tips)
 
-
+# --------------------------------------------
+# 8. Start the flow locally or via CLI
+# --------------------------------------------
 if __name__ == "__main__":
-    full_pipeline.serve(name="dabi2-pipeline-ohne-modelmodul")
+    full_pipeline.serve(name="dabi2-pipeline-inline-model")
