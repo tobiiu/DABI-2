@@ -1,0 +1,11 @@
+pandas
+pyarrow
+scikit-learn
+statsmodels
+matplotlib
+seaborn
+prefect
+python-dotenv
+joblib
+fastapi
+uvicorn
